@@ -1,0 +1,57 @@
+name: "ProdCycle Compliance Verification"
+description: "Scan PR changes for SOC 2, HIPAA, ISO 27001, NIST, PCI DSS, GDPR, and CCPA compliance violations via ProdCycle API"
+
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  api-key:
+    description: "ProdCycle compliance API key (cvk_...)"
+    required: true
+  api-url:
+    description: "ProdCycle API base URL"
+    required: false
+    default: "https://api.prodcycle.com"
+  frameworks:
+    description: "Comma-separated framework IDs to evaluate (soc2, hipaa, iso27001, nist, pci, gdpr, ccpa). Defaults to workspace setting."
+    required: false
+    default: ""
+  fail-on:
+    description: "Comma-separated severities that fail the check (critical, high, medium, low)"
+    required: false
+    default: "critical,high"
+  severity-threshold:
+    description: "Minimum severity to report (critical, high, medium, low)"
+    required: false
+    default: "low"
+  include:
+    description: 'Comma-separated glob patterns to include (e.g. "*.tf,*.yaml"). Defaults to all changed files.'
+    required: false
+    default: ""
+  exclude:
+    description: 'Comma-separated glob patterns to exclude (e.g. "test/**,docs/**")'
+    required: false
+    default: ""
+  annotate:
+    description: "Create inline PR annotations for findings"
+    required: false
+    default: "true"
+  comment:
+    description: "Post a summary comment on the PR"
+    required: false
+    default: "true"
+
+outputs:
+  passed:
+    description: "Whether the scan passed (true/false)"
+  findings-count:
+    description: "Total number of findings"
+  scan-id:
+    description: "ProdCycle scan ID for linking to the dashboard"
+  summary:
+    description: "JSON summary of results by severity and framework"
+
+runs:
+  using: "node20"
+  main: "dist/index.js"
