@@ -124,18 +124,28 @@ export async function collectChangedFiles(
   include: string[],
   exclude: string[],
 ): Promise<ChangedFile[]> {
-  // Ensure we have the full git history for the diff
-  try {
-    await exec.exec(
-      "git",
-      ["fetch", "--no-tags", "--depth=1", "origin", baseSha],
-      {
-        silent: true,
-        ignoreReturnCode: true,
-      },
-    );
-  } catch {
-    core.debug("Could not fetch base SHA — may already be available");
+  // Ensure we have the commits needed for the diff.
+  // With fetch-depth: 0, history is already complete.
+  // Only fetch if the base SHA is not available locally.
+  const hasBase = await exec.exec("git", ["cat-file", "-e", baseSha], {
+    silent: true,
+    ignoreReturnCode: true,
+  });
+
+  if (hasBase !== 0) {
+    core.debug(`Base SHA ${baseSha} not found locally — fetching...`);
+    try {
+      await exec.exec(
+        "git",
+        ["fetch", "--no-tags", "origin", baseSha],
+        {
+          silent: true,
+          ignoreReturnCode: true,
+        },
+      );
+    } catch {
+      core.debug("Could not fetch base SHA — continuing anyway");
+    }
   }
 
   const changedPaths = await getChangedFilePaths(baseSha, headSha);
