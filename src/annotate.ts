@@ -218,7 +218,7 @@ export async function postReviewComments(
   }
 
   // Only post review comments for findings that have line information
-  const reviewableFindings = findings.filter((f) => f.startLine > 0);
+  const reviewableFindings = findings.filter((f) => f.startLine > 0 && f.endLine > 0);
   if (reviewableFindings.length === 0) {
     core.debug("No findings with line information. Skipping PR review.");
     return;

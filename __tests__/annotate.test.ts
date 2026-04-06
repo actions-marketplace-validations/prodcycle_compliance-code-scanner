@@ -160,6 +160,16 @@ describe("annotate", () => {
       expect(mockCreateReview).not.toHaveBeenCalled();
     });
 
+    it("skips findings where endLine is 0 even if startLine is set", async () => {
+      const { postReviewComments } = await import("../src/annotate");
+
+      const findings = [makeFinding({ startLine: 5, endLine: 0 })];
+      mockCreateReview.mockResolvedValue({ data: {} });
+      await postReviewComments(findings, false);
+
+      expect(mockCreateReview).not.toHaveBeenCalled();
+    });
+
     it("skips when no github token is available", async () => {
       const { postReviewComments } = await import("../src/annotate");
 
