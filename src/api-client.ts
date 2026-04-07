@@ -145,7 +145,7 @@ export class ComplianceApiClient {
       body.frameworks = options.frameworks;
     }
 
-    if (options?.severityThreshold || options?.failOn || options?.excludeAcceptedRisk) {
+    if (options?.severityThreshold || options?.failOn || options?.excludeAcceptedRisk !== undefined) {
       body.options = {
         severity_threshold: options.severityThreshold,
         fail_on: options.failOn,
