@@ -41,6 +41,10 @@ inputs:
     description: "Post a summary comment on the PR"
     required: false
     default: "true"
+  exclude-accepted-risk:
+    description: "Skip findings that have been marked as accepted risk in the ProdCycle platform."
+    required: false
+    default: "true"
   github-token:
     description: "GitHub token for PR comments and annotations. Defaults to the automatic GITHUB_TOKEN."
     required: false

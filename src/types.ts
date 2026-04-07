@@ -13,6 +13,7 @@ export interface ActionInputs {
   exclude: string[];
   annotate: boolean;
   comment: boolean;
+  excludeAcceptedRisk: boolean;
 }
 
 /** A single changed file with its content */
@@ -30,6 +31,7 @@ export interface ValidateRequest {
     severity_threshold?: string;
     fail_on?: string[];
     include_prompt?: boolean;
+    exclude_accepted_risk?: boolean;
   };
 }
 
