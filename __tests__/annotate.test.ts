@@ -263,7 +263,7 @@ describe("annotate", () => {
       expect(body).toContain("AES-256");
     });
 
-    it("skips findings outside the PR diff", async () => {
+    it("posts file-level comments for findings outside the PR diff", async () => {
       const { postReviewComments } = await import("../src/annotate");
 
       // Finding on line 100 — well outside the diff range (5-29)
@@ -271,10 +271,14 @@ describe("annotate", () => {
       mockCreateReview.mockResolvedValue({ data: {} });
       await postReviewComments(findings, false);
 
-      expect(mockCreateReview).not.toHaveBeenCalled();
-      expect(core.info).toHaveBeenCalledWith(
-        expect.stringContaining("outside the PR diff"),
-      );
+      expect(mockCreateReview).toHaveBeenCalledOnce();
+      const call = mockCreateReview.mock.calls[0][0];
+      expect(call.comments).toHaveLength(1);
+      expect(call.comments[0].subject_type).toBe("file");
+      expect(call.comments[0].path).toBe("src/auth.ts");
+      expect(call.comments[0].line).toBeUndefined();
+      expect(call.comments[0].body).toContain("outside the PR diff");
+      expect(call.comments[0].body).toContain("view");
     });
 
     it("falls back to individual comments when batch review fails", async () => {
@@ -303,18 +307,21 @@ describe("annotate", () => {
       expect(mockCreateReview).toHaveBeenCalledOnce();
       expect(mockCreateReviewComment).toHaveBeenCalledTimes(2);
       expect(core.info).toHaveBeenCalledWith(
-        expect.stringContaining("Posted 1 of 2 inline comment(s) individually"),
+        expect.stringContaining("Posted 1 of 2 comment(s) individually"),
       );
     });
 
-    it("skips findings for files not in the PR diff", async () => {
+    it("posts file-level comments for files not in the PR diff", async () => {
       const { postReviewComments } = await import("../src/annotate");
 
       const findings = [makeFinding({ resourcePath: "src/unknown.ts", startLine: 5, endLine: 10 })];
       mockCreateReview.mockResolvedValue({ data: {} });
       await postReviewComments(findings, false);
 
-      expect(mockCreateReview).not.toHaveBeenCalled();
+      expect(mockCreateReview).toHaveBeenCalledOnce();
+      const call = mockCreateReview.mock.calls[0][0];
+      expect(call.comments[0].subject_type).toBe("file");
+      expect(call.comments[0].path).toBe("src/unknown.ts");
     });
   });
 });
