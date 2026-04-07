@@ -30176,63 +30176,76 @@ async function postReviewComments(findings, passed) {
     // GitHub rejects review comments on lines outside the diff with 422.
     const diffRanges = await fetchDiffRanges(octokit, owner, repo, prNumber);
     const comments = [];
-    let outsideDiffCount = 0;
     for (const f of reviewableFindings) {
-        const fileRanges = diffRanges.get(f.resourcePath);
-        if (!fileRanges) {
-            outsideDiffCount++;
-            continue;
-        }
-        // Check if the finding's end line falls within a diff hunk
-        const inDiff = fileRanges.some((range) => f.endLine >= range.start && f.endLine <= range.end);
-        if (!inDiff) {
-            outsideDiffCount++;
-            continue;
-        }
         const icon = SEVERITY_ICONS[f.severity] || "";
-        const body = [
-            `${icon} **[${f.severity.toUpperCase()}] ${f.ruleId}**`,
-            "",
-            f.message,
-            "",
-            `> **Remediation:** ${f.remediation}`,
-            "",
-            `Framework: ${f.framework.toUpperCase()} (${f.controlId})`,
-        ].join("\n");
-        const comment = {
-            path: f.resourcePath,
-            body,
-            line: f.endLine,
-            side: "RIGHT",
-        };
-        // Use multi-line comment if both start and end fall within the same hunk.
-        // GitHub requires both endpoints in the same hunk or the review is rejected.
-        if (f.startLine > 0 && f.startLine < f.endLine) {
-            const sharedHunk = fileRanges.find((range) => f.startLine >= range.start &&
-                f.startLine <= range.end &&
-                f.endLine >= range.start &&
-                f.endLine <= range.end);
-            if (sharedHunk) {
-                comment.start_line = f.startLine;
-                comment.start_side = "RIGHT";
+        const fileRanges = diffRanges.get(f.resourcePath);
+        // Check if the finding's end line falls within a diff hunk
+        const inDiff = fileRanges?.some((range) => f.endLine >= range.start && f.endLine <= range.end);
+        if (inDiff && fileRanges) {
+            // Inline comment on the specific line(s)
+            const body = [
+                `${icon} **[${f.severity.toUpperCase()}] ${f.ruleId}**`,
+                "",
+                f.message,
+                "",
+                `> **Remediation:** ${f.remediation}`,
+                "",
+                `Framework: ${f.framework.toUpperCase()} (${f.controlId})`,
+            ].join("\n");
+            const comment = {
+                path: f.resourcePath,
+                body,
+                line: f.endLine,
+                side: "RIGHT",
+            };
+            // Use multi-line comment if both start and end fall within the same hunk.
+            if (f.startLine > 0 && f.startLine < f.endLine) {
+                const sharedHunk = fileRanges.find((range) => f.startLine >= range.start &&
+                    f.startLine <= range.end &&
+                    f.endLine >= range.start &&
+                    f.endLine <= range.end);
+                if (sharedHunk) {
+                    comment.start_line = f.startLine;
+                    comment.start_side = "RIGHT";
+                }
             }
+            comments.push(comment);
         }
-        comments.push(comment);
-    }
-    if (outsideDiffCount > 0) {
-        core.info(`${outsideDiffCount} finding(s) are outside the PR diff and will not appear as inline comments.`);
-    }
-    if (comments.length === 0) {
-        core.info("No findings fall within the PR diff. Skipping inline review.");
-        return;
+        else {
+            // Finding is outside the diff — use a file-level comment so the
+            // user still sees it in the "Files changed" view.
+            const repoUrl = `https://github.com/${owner}/${repo}`;
+            const lineFragment = f.startLine !== f.endLine
+                ? `L${f.startLine}-L${f.endLine}`
+                : `L${f.startLine}`;
+            const fileLink = `${repoUrl}/blob/${commitSha}/${f.resourcePath}#${lineFragment}`;
+            const body = [
+                `${icon} **[${f.severity.toUpperCase()}] ${f.ruleId}** (line ${f.startLine}${f.endLine !== f.startLine ? `–${f.endLine}` : ""}) ([view](${fileLink}))`,
+                "",
+                f.message,
+                "",
+                `> **Remediation:** ${f.remediation}`,
+                "",
+                `Framework: ${f.framework.toUpperCase()} (${f.controlId})`,
+                "",
+                `_ℹ️ This finding is on a line outside the PR diff._`,
+            ].join("\n");
+            comments.push({
+                path: f.resourcePath,
+                body,
+                subject_type: "file",
+            });
+        }
     }
     const event = passed ? "COMMENT" : "REQUEST_CHANGES";
     const reviewBody = passed
         ? "✅ **ProdCycle Compliance Scan** — findings detected but within acceptable thresholds."
         : "❌ **ProdCycle Compliance Scan** — compliance violations found that require attention.";
-    core.debug(`Attempting to post review with ${comments.length} comment(s) on commit ${commitSha}`);
+    const inlineCount = comments.filter((c) => !c.subject_type).length;
+    const fileCount = comments.filter((c) => c.subject_type === "file").length;
+    core.info(`Posting review: ${inlineCount} inline comment(s), ${fileCount} file-level comment(s).`);
     for (const c of comments) {
-        core.debug(`  - ${c.path}:${c.start_line ?? c.line}-${c.line}`);
+        core.debug(`  - ${c.path}:${c.subject_type === "file" ? "file" : `${c.start_line ?? c.line}-${c.line}`}`);
     }
     try {
         await octokit.rest.pulls.createReview({
@@ -30253,29 +30266,42 @@ async function postReviewComments(findings, passed) {
         let posted = 0;
         for (const comment of comments) {
             try {
-                await octokit.rest.pulls.createReviewComment({
-                    owner,
-                    repo,
-                    pull_number: prNumber,
-                    commit_id: commitSha,
-                    path: comment.path,
-                    body: comment.body,
-                    line: comment.line,
-                    ...(comment.start_line ? { start_line: comment.start_line } : {}),
-                    side: "RIGHT",
-                    ...(comment.start_line ? { start_side: "RIGHT" } : {}),
-                });
+                if (comment.subject_type === "file") {
+                    await octokit.rest.pulls.createReviewComment({
+                        owner,
+                        repo,
+                        pull_number: prNumber,
+                        commit_id: commitSha,
+                        path: comment.path,
+                        body: comment.body,
+                        subject_type: "file",
+                    });
+                }
+                else {
+                    await octokit.rest.pulls.createReviewComment({
+                        owner,
+                        repo,
+                        pull_number: prNumber,
+                        commit_id: commitSha,
+                        path: comment.path,
+                        body: comment.body,
+                        line: comment.line,
+                        ...(comment.start_line ? { start_line: comment.start_line } : {}),
+                        side: "RIGHT",
+                        ...(comment.start_line ? { start_side: "RIGHT" } : {}),
+                    });
+                }
                 posted++;
             }
             catch (commentErr) {
-                core.debug(`Skipped comment on ${comment.path}:${comment.line}: ${commentErr instanceof Error ? commentErr.message : String(commentErr)}`);
+                core.debug(`Skipped comment on ${comment.path}:${comment.subject_type === "file" ? "file" : String(comment.line)}: ${commentErr instanceof Error ? commentErr.message : String(commentErr)}`);
             }
         }
         if (posted > 0) {
-            core.info(`Posted ${posted} of ${comments.length} inline comment(s) individually.`);
+            core.info(`Posted ${posted} of ${comments.length} comment(s) individually.`);
         }
         else {
-            core.info("No inline comments could be posted (findings are on lines outside the PR diff).");
+            core.info("No comments could be posted.");
         }
     }
 }
