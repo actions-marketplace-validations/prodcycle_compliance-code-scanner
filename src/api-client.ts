@@ -211,7 +211,7 @@ export class ComplianceApiClient {
           );
         }
 
-        return envelope.data;
+        return normalizeFindings(envelope.data);
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
 
@@ -332,6 +332,20 @@ export class PayloadTooLargeError extends Error {
     super(message);
     this.name = "PayloadTooLargeError";
   }
+}
+
+/**
+ * Normalize API response findings.
+ * The API returns `line` and `endLine` but the action uses `startLine` and `endLine`.
+ * This maps `line` → `startLine` so downstream code can use a consistent interface.
+ */
+function normalizeFindings(response: ValidateResponse): ValidateResponse {
+  response.findings = response.findings.map((f) => ({
+    ...f,
+    startLine: f.startLine || (f as unknown as { line?: number }).line || 0,
+    endLine: f.endLine || 0,
+  }));
+  return response;
 }
 
 function tryParseError(text: string): string | undefined {

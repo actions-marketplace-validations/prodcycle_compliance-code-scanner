@@ -30416,7 +30416,7 @@ class ComplianceApiClient {
                 if (envelope.status !== "success" || !envelope.data) {
                     throw new Error(`Unexpected API response: ${envelope.error?.message || JSON.stringify(envelope)}`);
                 }
-                return envelope.data;
+                return normalizeFindings(envelope.data);
             }
             catch (err) {
                 lastError = err instanceof Error ? err : new Error(String(err));
@@ -30522,6 +30522,19 @@ class PayloadTooLargeError extends Error {
     }
 }
 exports.PayloadTooLargeError = PayloadTooLargeError;
+/**
+ * Normalize API response findings.
+ * The API returns `line` and `endLine` but the action uses `startLine` and `endLine`.
+ * This maps `line` → `startLine` so downstream code can use a consistent interface.
+ */
+function normalizeFindings(response) {
+    response.findings = response.findings.map((f) => ({
+        ...f,
+        startLine: f.startLine || f.line || 0,
+        endLine: f.endLine || 0,
+    }));
+    return response;
+}
 function tryParseError(text) {
     try {
         const parsed = JSON.parse(text);
