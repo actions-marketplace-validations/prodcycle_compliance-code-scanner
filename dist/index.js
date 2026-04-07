@@ -30155,6 +30155,10 @@ async function postReviewComments(findings, passed) {
         core.debug("Not a pull request event. Skipping PR review comments.");
         return;
     }
+    const octokit = github.getOctokit(token);
+    const prNumber = context.payload.pull_request.number;
+    const commitSha = context.payload.pull_request.head?.sha;
+    const { owner, repo } = context.repo;
     // Only post review comments for findings that have line information
     const reviewableFindings = findings.filter((f) => f.startLine > 0 && f.endLine > 0);
     const skippedCount = findings.length - reviewableFindings.length;
@@ -30164,14 +30168,12 @@ async function postReviewComments(findings, passed) {
     if (reviewableFindings.length === 0) {
         return;
     }
-    const octokit = github.getOctokit(token);
-    const prNumber = context.payload.pull_request.number;
-    const commitSha = context.payload.pull_request.head?.sha;
-    const { owner, repo } = context.repo;
     if (!commitSha) {
         core.warning("Could not determine head commit SHA. Skipping PR review.");
         return;
     }
+    // Fetch existing review comments so we can skip duplicates
+    const existingKeys = await fetchExistingCommentKeys(octokit, owner, repo, prNumber);
     // Fetch the PR diff ranges so we only comment on lines within the diff.
     // GitHub rejects review comments on lines outside the diff with 422.
     const diffRanges = await fetchDiffRanges(octokit, owner, repo, prNumber);
@@ -30209,7 +30211,14 @@ async function postReviewComments(findings, passed) {
                     comment.start_side = "RIGHT";
                 }
             }
-            comments.push(comment);
+            // Deduplicate: skip if an identical comment already exists
+            const key = reviewCommentKey(comment.path, comment.line, f.ruleId);
+            if (!existingKeys.has(key)) {
+                comments.push(comment);
+            }
+            else {
+                core.debug(`Skipping duplicate inline comment: ${key}`);
+            }
         }
         else {
             // Finding is outside the diff — use a file-level comment so the
@@ -30230,12 +30239,24 @@ async function postReviewComments(findings, passed) {
                 "",
                 `_ℹ️ This finding is on a line outside the PR diff._`,
             ].join("\n");
-            comments.push({
-                path: f.resourcePath,
-                body,
-                subject_type: "file",
-            });
+            // Deduplicate: skip if an identical file-level comment already exists
+            const key = reviewCommentKey(f.resourcePath, undefined, f.ruleId);
+            if (!existingKeys.has(key)) {
+                comments.push({
+                    path: f.resourcePath,
+                    body,
+                    subject_type: "file",
+                });
+            }
+            else {
+                core.debug(`Skipping duplicate file-level comment: ${key}`);
+            }
         }
+    }
+    if (comments.length === 0) {
+        const dedupCount = reviewableFindings.length;
+        core.info(`All ${dedupCount} review comment(s) already exist on this PR. Skipping review.`);
+        return;
     }
     const event = passed ? "COMMENT" : "REQUEST_CHANGES";
     const reviewBody = passed
@@ -30304,6 +30325,42 @@ async function postReviewComments(findings, passed) {
             core.info("No comments could be posted.");
         }
     }
+}
+/**
+ * Build a dedup key for a review comment: path + line + ruleId.
+ * File-level comments use "file" instead of a line number.
+ */
+function reviewCommentKey(path, line, ruleId) {
+    return `${path}::${line ?? "file"}::${ruleId}`;
+}
+/**
+ * Regex to extract the ruleId from a review comment body.
+ * Matches the pattern: **[SEVERITY] RULE_ID**
+ */
+const RULE_ID_RE = /\*\*\[\w+\]\s+(.+?)\*\*/;
+/**
+ * Fetch existing review comments on the PR and build a set of dedup keys
+ * so we can avoid posting the same comment twice across re-runs.
+ */
+async function fetchExistingCommentKeys(octokit, owner, repo, prNumber) {
+    const keys = new Set();
+    try {
+        const comments = await octokit.paginate(octokit.rest.pulls.listReviewComments, { owner, repo, pull_number: prNumber, per_page: 100 });
+        for (const c of comments) {
+            const match = c.body?.match(RULE_ID_RE);
+            if (!match)
+                continue;
+            const ruleId = match[1];
+            const line = c.line ?? undefined;
+            // c.subject_type === "file" means file-level comment
+            const isFileLevel = c.subject_type === "file" || !line;
+            keys.add(reviewCommentKey(c.path, isFileLevel ? undefined : line, ruleId));
+        }
+    }
+    catch (err) {
+        core.warning(`Failed to fetch existing review comments for dedup: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return keys;
 }
 /**
  * Fetch the list of files changed in a PR and parse their diff hunks
