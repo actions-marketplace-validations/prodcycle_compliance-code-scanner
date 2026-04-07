@@ -19,6 +19,7 @@ vi.mock("@actions/core", () => ({
 // Mock @actions/github
 const mockCreateReview = vi.fn();
 const mockCreateReviewComment = vi.fn();
+const mockListReviewComments = vi.fn();
 const mockListFiles = vi.fn().mockResolvedValue({
   data: [
     {
@@ -35,7 +36,7 @@ const mockListComments = vi.fn().mockResolvedValue({ data: [] });
 const mockCreateComment = vi.fn();
 const mockUpdateComment = vi.fn();
 
-const mockPaginate = vi.fn().mockResolvedValue([
+const diffFiles = [
   {
     filename: "src/auth.ts",
     patch: "@@ -5,20 +5,25 @@\n some diff content",
@@ -44,7 +45,16 @@ const mockPaginate = vi.fn().mockResolvedValue([
     filename: "src/db.ts",
     patch: "@@ -18,5 +18,8 @@\n some diff content",
   },
-]);
+];
+
+// mockPaginate needs to return different data depending on the endpoint called
+const mockPaginate = vi.fn().mockImplementation((endpoint: unknown) => {
+  if (endpoint === mockListReviewComments) {
+    return Promise.resolve([]);
+  }
+  // Default: return diff files (for listFiles)
+  return Promise.resolve(diffFiles);
+});
 
 vi.mock("@actions/github", () => ({
   context: {
@@ -59,7 +69,7 @@ vi.mock("@actions/github", () => ({
   },
   getOctokit: vi.fn(() => ({
     rest: {
-      pulls: { createReview: mockCreateReview, createReviewComment: mockCreateReviewComment, listFiles: mockListFiles },
+      pulls: { createReview: mockCreateReview, createReviewComment: mockCreateReviewComment, listFiles: mockListFiles, listReviewComments: mockListReviewComments },
       issues: {
         listComments: mockListComments,
         createComment: mockCreateComment,
@@ -177,7 +187,8 @@ describe("annotate", () => {
       mockCreateReview.mockResolvedValue({ data: {} });
       await postReviewComments(findings, false);
 
-      expect(mockPaginate).toHaveBeenCalledOnce();
+      // Called twice: once for listReviewComments (dedup), once for listFiles (diff ranges)
+      expect(mockPaginate).toHaveBeenCalledTimes(2);
       expect(mockCreateReview).toHaveBeenCalledOnce();
       const call = mockCreateReview.mock.calls[0][0];
 
@@ -322,6 +333,100 @@ describe("annotate", () => {
       const call = mockCreateReview.mock.calls[0][0];
       expect(call.comments[0].subject_type).toBe("file");
       expect(call.comments[0].path).toBe("src/unknown.ts");
+    });
+
+    it("skips inline comments that already exist on the PR", async () => {
+      const { postReviewComments } = await import("../src/annotate");
+
+      // Simulate an existing review comment matching the finding
+      mockPaginate.mockImplementation((endpoint: unknown) => {
+        if (endpoint === mockListReviewComments) {
+          return Promise.resolve([
+            {
+              path: "src/auth.ts",
+              line: 15,
+              body: "🟠 **[HIGH] HIPAA-164.312-a1**\n\nMissing encryption",
+            },
+          ]);
+        }
+        return Promise.resolve(diffFiles);
+      });
+
+      const findings = [makeFinding({ startLine: 10, endLine: 15 })];
+      mockCreateReview.mockResolvedValue({ data: {} });
+      await postReviewComments(findings, false);
+
+      // All comments deduplicated — review should not be posted
+      expect(mockCreateReview).not.toHaveBeenCalled();
+      expect(core.info).toHaveBeenCalledWith(
+        expect.stringContaining("already exist on this PR"),
+      );
+    });
+
+    it("skips file-level comments that already exist on the PR", async () => {
+      const { postReviewComments } = await import("../src/annotate");
+
+      // Finding outside the diff (line 100) → file-level comment
+      mockPaginate.mockImplementation((endpoint: unknown) => {
+        if (endpoint === mockListReviewComments) {
+          return Promise.resolve([
+            {
+              path: "src/auth.ts",
+              subject_type: "file",
+              body: "🟠 **[HIGH] HIPAA-164.312-a1** (line 100) ([view](...))\n\nMissing encryption",
+            },
+          ]);
+        }
+        return Promise.resolve(diffFiles);
+      });
+
+      const findings = [makeFinding({ startLine: 100, endLine: 105 })];
+      mockCreateReview.mockResolvedValue({ data: {} });
+      await postReviewComments(findings, false);
+
+      expect(mockCreateReview).not.toHaveBeenCalled();
+      expect(core.info).toHaveBeenCalledWith(
+        expect.stringContaining("already exist on this PR"),
+      );
+    });
+
+    it("posts only new comments when some already exist", async () => {
+      const { postReviewComments } = await import("../src/annotate");
+
+      // One existing comment for HIPAA finding, but not for SOC2
+      mockPaginate.mockImplementation((endpoint: unknown) => {
+        if (endpoint === mockListReviewComments) {
+          return Promise.resolve([
+            {
+              path: "src/auth.ts",
+              line: 15,
+              body: "🟠 **[HIGH] HIPAA-164.312-a1**\n\nMissing encryption",
+            },
+          ]);
+        }
+        return Promise.resolve(diffFiles);
+      });
+
+      const findings = [
+        makeFinding({ startLine: 10, endLine: 15 }),
+        makeFinding({
+          ruleId: "SOC2-CC6.1",
+          severity: "medium",
+          resourcePath: "src/db.ts",
+          startLine: 20,
+          endLine: 20,
+          message: "Unencrypted database connection",
+        }),
+      ];
+
+      mockCreateReview.mockResolvedValue({ data: {} });
+      await postReviewComments(findings, false);
+
+      expect(mockCreateReview).toHaveBeenCalledOnce();
+      const call = mockCreateReview.mock.calls[0][0];
+      // Only the SOC2 finding should be posted
+      expect(call.comments).toHaveLength(1);
+      expect(call.comments[0].path).toBe("src/db.ts");
     });
   });
 });
