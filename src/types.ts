@@ -54,6 +54,8 @@ export interface ScanFinding {
   resourceName: string;
   startLine: number;
   endLine: number;
+  /** API returns `line` — mapped to `startLine` during deserialization */
+  line?: number | null;
   message: string;
   remediation: string;
 }
