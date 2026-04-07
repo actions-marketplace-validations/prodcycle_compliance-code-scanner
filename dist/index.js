@@ -30517,11 +30517,12 @@ class ComplianceApiClient {
         if (options?.frameworks && options.frameworks.length > 0) {
             body.frameworks = options.frameworks;
         }
-        if (options?.severityThreshold || options?.failOn) {
+        if (options?.severityThreshold || options?.failOn || options?.excludeAcceptedRisk) {
             body.options = {
                 severity_threshold: options.severityThreshold,
                 fail_on: options.failOn,
                 include_prompt: true,
+                exclude_accepted_risk: options.excludeAcceptedRisk,
             };
         }
         const url = `${this.apiUrl.replace(/\/+$/, "")}/v1/compliance/validate`;
@@ -30932,6 +30933,7 @@ function parseInputs() {
         exclude: parseCommaSeparated(core.getInput("exclude")),
         annotate: core.getBooleanInput("annotate"),
         comment: core.getBooleanInput("comment"),
+        excludeAcceptedRisk: core.getBooleanInput("exclude-accepted-risk"),
     };
 }
 function parseCommaSeparated(value) {
@@ -30974,6 +30976,7 @@ async function run() {
         frameworks: inputs.frameworks.length > 0 ? inputs.frameworks : undefined,
         severityThreshold: inputs.severityThreshold,
         failOn: inputs.failOn.length > 0 ? inputs.failOn : undefined,
+        excludeAcceptedRisk: inputs.excludeAcceptedRisk,
     });
     core.info(`Scan complete: ${result.passed ? "PASSED" : "FAILED"} with ${result.findingsCount} finding(s)`);
     // ── 4. Set outputs ──

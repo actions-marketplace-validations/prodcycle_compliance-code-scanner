@@ -40,6 +40,7 @@ function parseInputs(): ActionInputs {
     exclude: parseCommaSeparated(core.getInput("exclude")),
     annotate: core.getBooleanInput("annotate"),
     comment: core.getBooleanInput("comment"),
+    excludeAcceptedRisk: core.getBooleanInput("exclude-accepted-risk"),
   };
 }
 
@@ -106,6 +107,7 @@ async function run(): Promise<void> {
     frameworks: inputs.frameworks.length > 0 ? inputs.frameworks : undefined,
     severityThreshold: inputs.severityThreshold,
     failOn: inputs.failOn.length > 0 ? inputs.failOn : undefined,
+    excludeAcceptedRisk: inputs.excludeAcceptedRisk,
   });
 
   core.info(

@@ -97,6 +97,42 @@ describe("ComplianceApiClient", () => {
     expect(body.frameworks).toBeUndefined();
   });
 
+  it("passes exclude_accepted_risk option in request body", async () => {
+    const mockResponse = {
+      status: "success",
+      statusCode: 200,
+      data: {
+        passed: true,
+        findingsCount: 0,
+        findings: [],
+        summary: {
+          total: 0,
+          passed: 0,
+          failed: 0,
+          bySeverity: {},
+          byFramework: {},
+        },
+        scanId: "scan-789",
+      },
+    };
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true,
+      json: async () => mockResponse,
+    } as Response);
+
+    const client = new ComplianceApiClient(mockApiUrl, mockApiKey);
+    await client.validate(
+      [{ path: "main.tf", content: "" }],
+      { excludeAcceptedRisk: true, severityThreshold: "low" },
+    );
+
+    const body = JSON.parse(
+      (fetchSpy.mock.calls[0][1] as RequestInit).body as string,
+    );
+    expect(body.options.exclude_accepted_risk).toBe(true);
+  });
+
   it("throws on 4xx client errors without retrying", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
       ok: false,
