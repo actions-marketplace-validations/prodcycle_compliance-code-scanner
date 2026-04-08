@@ -31102,7 +31102,7 @@ async function collectAllFiles(repoRoot, include, exclude) {
 //
 // Flow:
 //   1. Parse action inputs
-//   2. Collect changed files from PR diff
+//   2. Collect changed files from PR diff (or all files for full scan)
 //   3. Send to ProdCycle /v1/compliance/validate
 //   4. Create PR annotations + comment with results
 //   5. Set outputs and fail if violations exceed threshold
@@ -31151,6 +31151,10 @@ function parseInputs() {
     if (!apiKey.startsWith("pc_")) {
         throw new Error('Invalid API key format. Expected a key starting with "pc_".');
     }
+    const rawMode = core.getInput("scan-mode") || "auto";
+    if (!["auto", "diff", "full"].includes(rawMode)) {
+        throw new Error(`Invalid scan-mode "${rawMode}". Must be one of: auto, diff, full.`);
+    }
     return {
         apiKey,
         apiUrl: core.getInput("api-url") || "https://api.prodcycle.com",
@@ -31159,7 +31163,7 @@ function parseInputs() {
         severityThreshold: core.getInput("severity-threshold") || "low",
         include: parseCommaSeparated(core.getInput("include")),
         exclude: parseCommaSeparated(core.getInput("exclude")),
-        scanMode: (core.getInput("scan-mode") || "diff"),
+        scanMode: rawMode,
         annotate: core.getBooleanInput("annotate"),
         comment: core.getBooleanInput("comment"),
         excludeAcceptedRisk: core.getBooleanInput("exclude-accepted-risk"),
@@ -31172,6 +31176,14 @@ function parseCommaSeparated(value) {
         .split(",")
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
+}
+async function runDiffScan(context, repoRoot, inputs) {
+    const baseSha = context.payload.pull_request?.base?.sha || "HEAD~1";
+    const headSha = context.payload.pull_request?.head?.sha ||
+        process.env.GITHUB_SHA ||
+        "HEAD";
+    core.info(`Diff scan: ${baseSha.substring(0, 8)} -> ${headSha.substring(0, 8)}`);
+    return (0, diff_1.collectChangedFiles)(baseSha, headSha, repoRoot, inputs.include, inputs.exclude);
 }
 async function run() {
     const inputs = parseInputs();
@@ -31186,19 +31198,25 @@ async function run() {
         core.info("Running full codebase scan...");
         files = await (0, diff_1.collectAllFiles)(repoRoot, inputs.include, inputs.exclude);
     }
+    else if (inputs.scanMode === "auto") {
+        // Auto mode — diff scan for PRs, full scan for pushes
+        if (context.payload.pull_request) {
+            core.info("Auto mode: PR detected, running diff scan...");
+            files = await runDiffScan(context, repoRoot, inputs);
+        }
+        else {
+            core.info("Auto mode: No PR detected, running full codebase scan...");
+            files = await (0, diff_1.collectAllFiles)(repoRoot, inputs.include, inputs.exclude);
+        }
+    }
     else {
-        // Diff mode (default) — only scan the diffs from the PR
+        // Diff mode (explicitly requested) — only scan the diffs from the PR
         if (!context.payload.pull_request) {
             core.info("Not a pull request event. Falling back to full codebase scan.");
             files = await (0, diff_1.collectAllFiles)(repoRoot, inputs.include, inputs.exclude);
         }
         else {
-            const baseSha = context.payload.pull_request.base?.sha || "HEAD~1";
-            const headSha = context.payload.pull_request.head?.sha ||
-                process.env.GITHUB_SHA ||
-                "HEAD";
-            core.info(`Diff scan: ${baseSha.substring(0, 8)} -> ${headSha.substring(0, 8)}`);
-            files = await (0, diff_1.collectChangedFiles)(baseSha, headSha, repoRoot, inputs.include, inputs.exclude);
+            files = await runDiffScan(context, repoRoot, inputs);
         }
     }
     if (files.length === 0) {
@@ -31227,7 +31245,7 @@ async function run() {
     // In diff mode, filter out findings on lines outside the PR diff.
     // The API scans full file contents for context but we only surface
     // findings on lines the PR actually changed.
-    if (inputs.scanMode === "diff" && context.payload.pull_request) {
+    if ((inputs.scanMode === "diff" || inputs.scanMode === "auto") && context.payload.pull_request) {
         result = (0, diff_1.filterFindingsToDiff)(result, files, inputs.failOn);
     }
     core.info(`Scan complete: ${result.passed ? "PASSED" : "FAILED"} with ${result.findingsCount} finding(s)`);
