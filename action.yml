@@ -41,6 +41,10 @@ inputs:
     description: "Post a summary comment on the PR"
     required: false
     default: "true"
+  scan-mode:
+    description: "Scan mode: 'diff' scans only the changed lines (default for PRs), 'full' scans the entire codebase."
+    required: false
+    default: "diff"
   exclude-accepted-risk:
     description: "Skip findings that have been marked as accepted risk in the ProdCycle platform."
     required: false

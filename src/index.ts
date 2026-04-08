@@ -12,7 +12,7 @@
 
 import * as core from "@actions/core";
 import * as github from "@actions/github";
-import { collectChangedFiles } from "./diff";
+import { collectChangedFiles, collectAllFiles } from "./diff";
 import { ComplianceApiClient } from "./api-client";
 import {
   createAnnotations,
@@ -38,6 +38,7 @@ function parseInputs(): ActionInputs {
     severityThreshold: core.getInput("severity-threshold") || "low",
     include: parseCommaSeparated(core.getInput("include")),
     exclude: parseCommaSeparated(core.getInput("exclude")),
+    scanMode: (core.getInput("scan-mode") || "diff") as "diff" | "full",
     annotate: core.getBooleanInput("annotate"),
     comment: core.getBooleanInput("comment"),
     excludeAcceptedRisk: core.getBooleanInput("exclude-accepted-risk"),
@@ -62,31 +63,38 @@ async function run(): Promise<void> {
 
   const context = github.context;
 
-  if (!context.payload.pull_request) {
-    core.info("Not a pull request event. Scanning all files in workspace.");
-  }
-
-  const baseSha =
-    context.payload.pull_request?.base?.sha ||
-    process.env.GITHUB_BASE_REF ||
-    "HEAD~1";
-  const headSha =
-    context.payload.pull_request?.head?.sha || process.env.GITHUB_SHA || "HEAD";
-
-  core.info(
-    `Base: ${baseSha.substring(0, 8)} -> Head: ${headSha.substring(0, 8)}`,
-  );
-
-  // ── 2. Collect changed files ──
-
   const repoRoot = process.env.GITHUB_WORKSPACE || process.cwd();
-  const files = await collectChangedFiles(
-    baseSha,
-    headSha,
-    repoRoot,
-    inputs.include,
-    inputs.exclude,
-  );
+  let files;
+
+  if (inputs.scanMode === "full") {
+    // Full codebase scan — scan every file in the repo
+    core.info("Running full codebase scan...");
+    files = await collectAllFiles(repoRoot, inputs.include, inputs.exclude);
+  } else {
+    // Diff mode (default) — only scan the diffs from the PR
+    if (!context.payload.pull_request) {
+      core.info("Not a pull request event. Falling back to full codebase scan.");
+      files = await collectAllFiles(repoRoot, inputs.include, inputs.exclude);
+    } else {
+      const baseSha = context.payload.pull_request.base?.sha || "HEAD~1";
+      const headSha =
+        context.payload.pull_request.head?.sha ||
+        process.env.GITHUB_SHA ||
+        "HEAD";
+
+      core.info(
+        `Diff scan: ${baseSha.substring(0, 8)} -> ${headSha.substring(0, 8)}`,
+      );
+
+      files = await collectChangedFiles(
+        baseSha,
+        headSha,
+        repoRoot,
+        inputs.include,
+        inputs.exclude,
+      );
+    }
+  }
 
   if (files.length === 0) {
     core.info("No changed files to scan");

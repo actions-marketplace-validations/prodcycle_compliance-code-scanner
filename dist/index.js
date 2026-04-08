@@ -30565,12 +30565,23 @@ class ComplianceApiClient {
      */
     async sendBatch(files, options) {
         const filesMap = {};
+        const diffsMap = {};
+        let hasDiffs = false;
         for (const f of files) {
             filesMap[f.path] = f.content;
+            if (f.diff) {
+                diffsMap[f.path] = f.diff;
+                hasDiffs = true;
+            }
         }
         const body = {
             files: filesMap,
         };
+        // When diffs are available (diff scan mode), include them so the API
+        // can scope its analysis to only the changed lines.
+        if (hasDiffs) {
+            body.diffs = diffsMap;
+        }
         if (options?.frameworks && options.frameworks.length > 0) {
             body.frameworks = options.frameworks;
         }
@@ -30672,9 +30683,14 @@ function createBatches(files) {
 /** Estimate the JSON-serialized size of a file entry in bytes. */
 function estimateFileBytes(file) {
     // Buffer.byteLength is accurate for UTF-8; add overhead for JSON key/value quoting
-    return (Buffer.byteLength(file.path, "utf8") +
+    let size = Buffer.byteLength(file.path, "utf8") +
         Buffer.byteLength(file.content, "utf8") +
-        PER_FILE_OVERHEAD_BYTES);
+        PER_FILE_OVERHEAD_BYTES;
+    // If diffs are present, they are also serialized in the payload
+    if (file.diff) {
+        size += Buffer.byteLength(file.diff, "utf8") + PER_FILE_OVERHEAD_BYTES;
+    }
+    return size;
 }
 /**
  * Merge multiple batch responses into a single ValidateResponse.
@@ -30776,8 +30792,9 @@ function sleep(ms) {
 // =============================================================================
 //
 // Collects changed files from a PR by comparing the base and head refs.
-// Reads full file content (not just the diff) because the compliance scanner
-// needs complete files to evaluate resource configurations accurately.
+// Supports two modes:
+//   - diff mode (default): sends only the unified diff for each changed file
+//   - full mode: scans the entire codebase (all files in the repo)
 // =============================================================================
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -30816,7 +30833,9 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getChangedFilePaths = getChangedFilePaths;
 exports.filterPaths = filterPaths;
 exports.readFileContents = readFileContents;
+exports.getFileDiffs = getFileDiffs;
 exports.collectChangedFiles = collectChangedFiles;
+exports.collectAllFiles = collectAllFiles;
 const core = __importStar(__nccwpck_require__(6966));
 const exec = __importStar(__nccwpck_require__(2851));
 const fs = __importStar(__nccwpck_require__(3024));
@@ -30886,12 +30905,36 @@ function readFileContents(filePaths, repoRoot) {
     return files;
 }
 /**
- * Collect all changed files for the PR, filtered and with content.
+ * Get the unified diff for each changed file.
+ * Returns a map of file path → unified diff text.
  */
-async function collectChangedFiles(baseSha, headSha, repoRoot, include, exclude) {
-    // Ensure we have the commits needed for the diff.
-    // With fetch-depth: 0, history is already complete.
-    // Only fetch if the base SHA is not available locally.
+async function getFileDiffs(baseSha, headSha, filePaths) {
+    const diffs = new Map();
+    for (const filePath of filePaths) {
+        let stdout = "";
+        try {
+            await exec.exec("git", ["diff", `${baseSha}...${headSha}`, "--", filePath], {
+                listeners: {
+                    stdout: (data) => {
+                        stdout += data.toString();
+                    },
+                },
+                silent: true,
+            });
+            if (stdout.trim()) {
+                diffs.set(filePath, stdout.trim());
+            }
+        }
+        catch (err) {
+            core.debug(`Could not get diff for ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+    return diffs;
+}
+/**
+ * Ensure the base SHA is available locally for diffing.
+ */
+async function ensureBaseSha(baseSha) {
     const hasBase = await exec.exec("git", ["cat-file", "-e", baseSha], {
         silent: true,
         ignoreReturnCode: true,
@@ -30908,10 +30951,56 @@ async function collectChangedFiles(baseSha, headSha, repoRoot, include, exclude)
             core.debug("Could not fetch base SHA. Continuing anyway.");
         }
     }
+}
+/**
+ * Collect changed files for the PR with their diffs.
+ * Sends full file content AND the unified diff so the API can scope
+ * its analysis to the changed lines while still having full context.
+ */
+async function collectChangedFiles(baseSha, headSha, repoRoot, include, exclude) {
+    await ensureBaseSha(baseSha);
     const changedPaths = await getChangedFilePaths(baseSha, headSha);
     core.info(`Found ${changedPaths.length} changed file(s) in PR`);
     const filteredPaths = filterPaths(changedPaths, include, exclude);
     if (filteredPaths.length !== changedPaths.length) {
+        core.info(`After filtering: ${filteredPaths.length} file(s)`);
+    }
+    if (filteredPaths.length === 0) {
+        return [];
+    }
+    // Read full file contents (for context) and attach diffs
+    const baseFiles = readFileContents(filteredPaths, repoRoot);
+    const diffMap = await getFileDiffs(baseSha, headSha, filteredPaths);
+    // Attach diffs to the files that have them
+    for (const file of baseFiles) {
+        const diff = diffMap.get(file.path);
+        if (diff) {
+            file.diff = diff;
+        }
+    }
+    return baseFiles;
+}
+/**
+ * Collect ALL files in the repository for a full codebase scan.
+ * Uses git ls-files to enumerate tracked files, then applies filters.
+ */
+async function collectAllFiles(repoRoot, include, exclude) {
+    let stdout = "";
+    await exec.exec("git", ["ls-files", "--cached", "--others", "--exclude-standard"], {
+        listeners: {
+            stdout: (data) => {
+                stdout += data.toString();
+            },
+        },
+        silent: true,
+    });
+    const allPaths = stdout
+        .trim()
+        .split("\n")
+        .filter((f) => f.length > 0);
+    core.info(`Found ${allPaths.length} file(s) in repository`);
+    const filteredPaths = filterPaths(allPaths, include, exclude);
+    if (filteredPaths.length !== allPaths.length) {
         core.info(`After filtering: ${filteredPaths.length} file(s)`);
     }
     if (filteredPaths.length === 0) {
@@ -30991,6 +31080,7 @@ function parseInputs() {
         severityThreshold: core.getInput("severity-threshold") || "low",
         include: parseCommaSeparated(core.getInput("include")),
         exclude: parseCommaSeparated(core.getInput("exclude")),
+        scanMode: (core.getInput("scan-mode") || "diff"),
         annotate: core.getBooleanInput("annotate"),
         comment: core.getBooleanInput("comment"),
         excludeAcceptedRisk: core.getBooleanInput("exclude-accepted-risk"),
@@ -31010,17 +31100,28 @@ async function run() {
     core.setSecret(inputs.apiKey);
     // ── 1. Determine PR context ──
     const context = github.context;
-    if (!context.payload.pull_request) {
-        core.info("Not a pull request event. Scanning all files in workspace.");
-    }
-    const baseSha = context.payload.pull_request?.base?.sha ||
-        process.env.GITHUB_BASE_REF ||
-        "HEAD~1";
-    const headSha = context.payload.pull_request?.head?.sha || process.env.GITHUB_SHA || "HEAD";
-    core.info(`Base: ${baseSha.substring(0, 8)} -> Head: ${headSha.substring(0, 8)}`);
-    // ── 2. Collect changed files ──
     const repoRoot = process.env.GITHUB_WORKSPACE || process.cwd();
-    const files = await (0, diff_1.collectChangedFiles)(baseSha, headSha, repoRoot, inputs.include, inputs.exclude);
+    let files;
+    if (inputs.scanMode === "full") {
+        // Full codebase scan — scan every file in the repo
+        core.info("Running full codebase scan...");
+        files = await (0, diff_1.collectAllFiles)(repoRoot, inputs.include, inputs.exclude);
+    }
+    else {
+        // Diff mode (default) — only scan the diffs from the PR
+        if (!context.payload.pull_request) {
+            core.info("Not a pull request event. Falling back to full codebase scan.");
+            files = await (0, diff_1.collectAllFiles)(repoRoot, inputs.include, inputs.exclude);
+        }
+        else {
+            const baseSha = context.payload.pull_request.base?.sha || "HEAD~1";
+            const headSha = context.payload.pull_request.head?.sha ||
+                process.env.GITHUB_SHA ||
+                "HEAD";
+            core.info(`Diff scan: ${baseSha.substring(0, 8)} -> ${headSha.substring(0, 8)}`);
+            files = await (0, diff_1.collectChangedFiles)(baseSha, headSha, repoRoot, inputs.include, inputs.exclude);
+        }
+    }
     if (files.length === 0) {
         core.info("No changed files to scan");
         core.setOutput("passed", "true");

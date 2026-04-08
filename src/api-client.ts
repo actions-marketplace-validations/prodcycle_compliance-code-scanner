@@ -136,13 +136,26 @@ export class ComplianceApiClient {
     },
   ): Promise<ValidateResponse> {
     const filesMap: Record<string, string> = {};
+    const diffsMap: Record<string, string> = {};
+    let hasDiffs = false;
+
     for (const f of files) {
       filesMap[f.path] = f.content;
+      if (f.diff) {
+        diffsMap[f.path] = f.diff;
+        hasDiffs = true;
+      }
     }
 
     const body: ValidateRequest = {
       files: filesMap,
     };
+
+    // When diffs are available (diff scan mode), include them so the API
+    // can scope its analysis to only the changed lines.
+    if (hasDiffs) {
+      body.diffs = diffsMap;
+    }
 
     if (options?.frameworks && options.frameworks.length > 0) {
       body.frameworks = options.frameworks;
@@ -278,11 +291,17 @@ export function createBatches(files: ChangedFile[]): ChangedFile[][] {
 /** Estimate the JSON-serialized size of a file entry in bytes. */
 function estimateFileBytes(file: ChangedFile): number {
   // Buffer.byteLength is accurate for UTF-8; add overhead for JSON key/value quoting
-  return (
+  let size =
     Buffer.byteLength(file.path, "utf8") +
     Buffer.byteLength(file.content, "utf8") +
-    PER_FILE_OVERHEAD_BYTES
-  );
+    PER_FILE_OVERHEAD_BYTES;
+
+  // If diffs are present, they are also serialized in the payload
+  if (file.diff) {
+    size += Buffer.byteLength(file.diff, "utf8") + PER_FILE_OVERHEAD_BYTES;
+  }
+
+  return size;
 }
 
 /**
