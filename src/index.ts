@@ -12,7 +12,7 @@
 
 import * as core from "@actions/core";
 import * as github from "@actions/github";
-import { collectChangedFiles, collectAllFiles } from "./diff";
+import { collectChangedFiles, collectAllFiles, filterFindingsToDiff } from "./diff";
 import { ComplianceApiClient } from "./api-client";
 import {
   createAnnotations,
@@ -117,13 +117,20 @@ async function run(): Promise<void> {
     core.info(`PR author: ${prAuthor}`);
   }
 
-  const result = await client.validate(files, {
+  let result = await client.validate(files, {
     frameworks: inputs.frameworks.length > 0 ? inputs.frameworks : undefined,
     severityThreshold: inputs.severityThreshold,
     failOn: inputs.failOn.length > 0 ? inputs.failOn : undefined,
     excludeAcceptedRisk: inputs.excludeAcceptedRisk,
     actor: prAuthor,
   });
+
+  // In diff mode, filter out findings on lines outside the PR diff.
+  // The API scans full file contents for context but we only surface
+  // findings on lines the PR actually changed.
+  if (inputs.scanMode === "diff" && context.payload.pull_request) {
+    result = filterFindingsToDiff(result, files, inputs.failOn);
+  }
 
   core.info(
     `Scan complete: ${result.passed ? "PASSED" : "FAILED"} with ${result.findingsCount} finding(s)`,

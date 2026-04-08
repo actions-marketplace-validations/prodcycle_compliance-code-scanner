@@ -30835,6 +30835,8 @@ exports.filterPaths = filterPaths;
 exports.readFileContents = readFileContents;
 exports.getFileDiffs = getFileDiffs;
 exports.collectChangedFiles = collectChangedFiles;
+exports.parseDiffRanges = parseDiffRanges;
+exports.filterFindingsToDiff = filterFindingsToDiff;
 exports.collectAllFiles = collectAllFiles;
 const core = __importStar(__nccwpck_require__(6966));
 const exec = __importStar(__nccwpck_require__(2851));
@@ -30843,6 +30845,8 @@ const path = __importStar(__nccwpck_require__(6760));
 const minimatch_1 = __nccwpck_require__(6597);
 const MAX_FILE_SIZE = 512 * 1024; // 512 KB per file
 const MAX_TOTAL_FILES = 500;
+/** Regex to parse unified diff hunk headers: @@ -old +newStart,newCount @@ */
+const HUNK_HEADER_RE = /^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@/gm;
 /**
  * Get the list of files changed in the PR.
  * Uses git diff between the merge base and HEAD.
@@ -30979,6 +30983,81 @@ async function collectChangedFiles(baseSha, headSha, repoRoot, include, exclude)
         }
     }
     return baseFiles;
+}
+/**
+ * Parse unified diff text to extract changed line ranges on the new (right) side.
+ */
+function parseDiffRanges(patch) {
+    const ranges = [];
+    // Reset lastIndex since we reuse a global regex pattern
+    const re = new RegExp(HUNK_HEADER_RE.source, HUNK_HEADER_RE.flags);
+    let match;
+    while ((match = re.exec(patch)) !== null) {
+        const start = parseInt(match[1], 10);
+        const count = match[2] !== undefined ? parseInt(match[2], 10) : 1;
+        if (count > 0) {
+            ranges.push({ start, end: start + count - 1 });
+        }
+    }
+    return ranges;
+}
+/**
+ * Filter API findings to only those whose lines overlap with the PR diff.
+ * In diff scan mode, we should only surface findings on lines the PR actually
+ * changed — not pre-existing issues on untouched lines.
+ *
+ * Also recalculates summary counts and pass/fail status.
+ */
+function filterFindingsToDiff(result, files, failOn) {
+    // Build a map of file path → diff line ranges
+    const diffRangesByFile = new Map();
+    for (const file of files) {
+        if (file.diff) {
+            const ranges = parseDiffRanges(file.diff);
+            if (ranges.length > 0) {
+                diffRangesByFile.set(file.path, ranges);
+            }
+        }
+    }
+    // If no diffs available (shouldn't happen in diff mode), return as-is
+    if (diffRangesByFile.size === 0) {
+        return result;
+    }
+    const filtered = result.findings.filter((f) => {
+        const ranges = diffRangesByFile.get(f.resourcePath);
+        if (!ranges) {
+            // File not in the diff at all — drop the finding
+            return false;
+        }
+        // Keep finding if any of its lines overlap with a diff hunk
+        return ranges.some((range) => f.endLine >= range.start && f.startLine <= range.end);
+    });
+    const droppedCount = result.findings.length - filtered.length;
+    if (droppedCount > 0) {
+        core.info(`Filtered out ${droppedCount} finding(s) on lines outside the PR diff.`);
+    }
+    // Recalculate summary
+    const bySeverity = {};
+    const byFramework = {};
+    for (const f of filtered) {
+        bySeverity[f.severity] = (bySeverity[f.severity] || 0) + 1;
+        byFramework[f.framework] = (byFramework[f.framework] || 0) + 1;
+    }
+    const failOnSet = new Set(failOn.map((s) => s.toLowerCase()));
+    const hasFailure = filtered.some((f) => failOnSet.has(f.severity.toLowerCase()));
+    return {
+        ...result,
+        findings: filtered,
+        findingsCount: filtered.length,
+        passed: !hasFailure,
+        summary: {
+            total: filtered.length,
+            passed: 0,
+            failed: filtered.length,
+            bySeverity,
+            byFramework,
+        },
+    };
 }
 /**
  * Collect ALL files in the repository for a full codebase scan.
@@ -31138,13 +31217,19 @@ async function run() {
     if (prAuthor) {
         core.info(`PR author: ${prAuthor}`);
     }
-    const result = await client.validate(files, {
+    let result = await client.validate(files, {
         frameworks: inputs.frameworks.length > 0 ? inputs.frameworks : undefined,
         severityThreshold: inputs.severityThreshold,
         failOn: inputs.failOn.length > 0 ? inputs.failOn : undefined,
         excludeAcceptedRisk: inputs.excludeAcceptedRisk,
         actor: prAuthor,
     });
+    // In diff mode, filter out findings on lines outside the PR diff.
+    // The API scans full file contents for context but we only surface
+    // findings on lines the PR actually changed.
+    if (inputs.scanMode === "diff" && context.payload.pull_request) {
+        result = (0, diff_1.filterFindingsToDiff)(result, files, inputs.failOn);
+    }
     core.info(`Scan complete: ${result.passed ? "PASSED" : "FAILED"} with ${result.findingsCount} finding(s)`);
     // ── 4. Set outputs ──
     core.setOutput("passed", String(result.passed));
