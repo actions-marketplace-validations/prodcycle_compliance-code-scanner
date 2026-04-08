@@ -13,10 +13,13 @@ import * as exec from "@actions/exec";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { minimatch } from "minimatch";
-import type { ChangedFile } from "./types";
+import type { ChangedFile, ValidateResponse } from "./types";
 
 const MAX_FILE_SIZE = 512 * 1024; // 512 KB per file
 const MAX_TOTAL_FILES = 500;
+
+/** Regex to parse unified diff hunk headers: @@ -old +newStart,newCount @@ */
+const HUNK_HEADER_RE = /^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@/gm;
 
 /**
  * Get the list of files changed in the PR.
@@ -219,6 +222,99 @@ export async function collectChangedFiles(
   }
 
   return baseFiles;
+}
+
+/**
+ * Parse unified diff text to extract changed line ranges on the new (right) side.
+ */
+export function parseDiffRanges(patch: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  // Reset lastIndex since we reuse a global regex pattern
+  const re = new RegExp(HUNK_HEADER_RE.source, HUNK_HEADER_RE.flags);
+  let match: RegExpExecArray | null;
+
+  while ((match = re.exec(patch)) !== null) {
+    const start = parseInt(match[1], 10);
+    const count = match[2] !== undefined ? parseInt(match[2], 10) : 1;
+    if (count > 0) {
+      ranges.push({ start, end: start + count - 1 });
+    }
+  }
+
+  return ranges;
+}
+
+/**
+ * Filter API findings to only those whose lines overlap with the PR diff.
+ * In diff scan mode, we should only surface findings on lines the PR actually
+ * changed — not pre-existing issues on untouched lines.
+ *
+ * Also recalculates summary counts and pass/fail status.
+ */
+export function filterFindingsToDiff(
+  result: ValidateResponse,
+  files: ChangedFile[],
+  failOn: string[],
+): ValidateResponse {
+  // Build a map of file path → diff line ranges
+  const diffRangesByFile = new Map<string, Array<{ start: number; end: number }>>();
+  for (const file of files) {
+    if (file.diff) {
+      const ranges = parseDiffRanges(file.diff);
+      if (ranges.length > 0) {
+        diffRangesByFile.set(file.path, ranges);
+      }
+    }
+  }
+
+  // If no diffs available (shouldn't happen in diff mode), return as-is
+  if (diffRangesByFile.size === 0) {
+    return result;
+  }
+
+  const filtered = result.findings.filter((f) => {
+    const ranges = diffRangesByFile.get(f.resourcePath);
+    if (!ranges) {
+      // File not in the diff at all — drop the finding
+      return false;
+    }
+    // Keep finding if any of its lines overlap with a diff hunk
+    return ranges.some(
+      (range) => f.endLine >= range.start && f.startLine <= range.end,
+    );
+  });
+
+  const droppedCount = result.findings.length - filtered.length;
+  if (droppedCount > 0) {
+    core.info(
+      `Filtered out ${droppedCount} finding(s) on lines outside the PR diff.`,
+    );
+  }
+
+  // Recalculate summary
+  const bySeverity: Record<string, number> = {};
+  const byFramework: Record<string, number> = {};
+  for (const f of filtered) {
+    bySeverity[f.severity] = (bySeverity[f.severity] || 0) + 1;
+    byFramework[f.framework] = (byFramework[f.framework] || 0) + 1;
+  }
+
+  const failOnSet = new Set(failOn.map((s) => s.toLowerCase()));
+  const hasFailure = filtered.some((f) => failOnSet.has(f.severity.toLowerCase()));
+
+  return {
+    ...result,
+    findings: filtered,
+    findingsCount: filtered.length,
+    passed: !hasFailure,
+    summary: {
+      total: filtered.length,
+      passed: 0,
+      failed: filtered.length,
+      bySeverity,
+      byFramework,
+    },
+  };
 }
 
 /**
