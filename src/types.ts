@@ -11,6 +11,7 @@ export interface ActionInputs {
   severityThreshold: string;
   include: string[];
   exclude: string[];
+  scanMode: "diff" | "full";
   annotate: boolean;
   comment: boolean;
   excludeAcceptedRisk: boolean;
@@ -20,12 +21,16 @@ export interface ActionInputs {
 export interface ChangedFile {
   path: string;
   content: string;
+  /** Unified diff for the file (only in diff scan mode) */
+  diff?: string;
 }
 
 // -- API request/response types matching ProdCycle /v1/compliance/validate --
 
 export interface ValidateRequest {
   files: Record<string, string>;
+  /** When present, the API receives diffs instead of full file contents */
+  diffs?: Record<string, string>;
   frameworks?: string[];
   /** GitHub username of the user who opened the PR */
   actor?: string;

@@ -3,8 +3,9 @@
 // =============================================================================
 //
 // Collects changed files from a PR by comparing the base and head refs.
-// Reads full file content (not just the diff) because the compliance scanner
-// needs complete files to evaluate resource configurations accurately.
+// Supports two modes:
+//   - diff mode (default): sends only the unified diff for each changed file
+//   - full mode: scans the entire codebase (all files in the repo)
 // =============================================================================
 
 import * as core from "@actions/core";
@@ -115,18 +116,48 @@ export function readFileContents(
 }
 
 /**
- * Collect all changed files for the PR, filtered and with content.
+ * Get the unified diff for each changed file.
+ * Returns a map of file path → unified diff text.
  */
-export async function collectChangedFiles(
+export async function getFileDiffs(
   baseSha: string,
   headSha: string,
-  repoRoot: string,
-  include: string[],
-  exclude: string[],
-): Promise<ChangedFile[]> {
-  // Ensure we have the commits needed for the diff.
-  // With fetch-depth: 0, history is already complete.
-  // Only fetch if the base SHA is not available locally.
+  filePaths: string[],
+): Promise<Map<string, string>> {
+  const diffs = new Map<string, string>();
+
+  for (const filePath of filePaths) {
+    let stdout = "";
+    try {
+      await exec.exec(
+        "git",
+        ["diff", `${baseSha}...${headSha}`, "--", filePath],
+        {
+          listeners: {
+            stdout: (data: Buffer) => {
+              stdout += data.toString();
+            },
+          },
+          silent: true,
+        },
+      );
+      if (stdout.trim()) {
+        diffs.set(filePath, stdout.trim());
+      }
+    } catch (err) {
+      core.debug(
+        `Could not get diff for ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  return diffs;
+}
+
+/**
+ * Ensure the base SHA is available locally for diffing.
+ */
+async function ensureBaseSha(baseSha: string): Promise<void> {
   const hasBase = await exec.exec("git", ["cat-file", "-e", baseSha], {
     silent: true,
     ignoreReturnCode: true,
@@ -147,12 +178,82 @@ export async function collectChangedFiles(
       core.debug("Could not fetch base SHA. Continuing anyway.");
     }
   }
+}
+
+/**
+ * Collect changed files for the PR in diff mode.
+ * Only the unified diff is sent to the API (not full file contents).
+ */
+export async function collectChangedFiles(
+  baseSha: string,
+  headSha: string,
+  repoRoot: string,
+  include: string[],
+  exclude: string[],
+  mode: "diff" | "full" = "diff",
+): Promise<ChangedFile[]> {
+  await ensureBaseSha(baseSha);
 
   const changedPaths = await getChangedFilePaths(baseSha, headSha);
   core.info(`Found ${changedPaths.length} changed file(s) in PR`);
 
   const filteredPaths = filterPaths(changedPaths, include, exclude);
   if (filteredPaths.length !== changedPaths.length) {
+    core.info(`After filtering: ${filteredPaths.length} file(s)`);
+  }
+
+  if (filteredPaths.length === 0) {
+    return [];
+  }
+
+  if (mode === "diff") {
+    // Diff mode: send only the unified diff for each file
+    const diffMap = await getFileDiffs(baseSha, headSha, filteredPaths);
+    const files: ChangedFile[] = [];
+
+    for (const filePath of filteredPaths) {
+      const diff = diffMap.get(filePath);
+      if (diff) {
+        files.push({ path: filePath, content: "", diff });
+      }
+    }
+
+    return files;
+  }
+
+  // Full mode on PR: read full file contents for changed files
+  return readFileContents(filteredPaths, repoRoot);
+}
+
+/**
+ * Collect ALL files in the repository for a full codebase scan.
+ * Uses git ls-files to enumerate tracked files, then applies filters.
+ */
+export async function collectAllFiles(
+  repoRoot: string,
+  include: string[],
+  exclude: string[],
+): Promise<ChangedFile[]> {
+  let stdout = "";
+
+  await exec.exec("git", ["ls-files", "--cached", "--others", "--exclude-standard"], {
+    listeners: {
+      stdout: (data: Buffer) => {
+        stdout += data.toString();
+      },
+    },
+    silent: true,
+  });
+
+  const allPaths = stdout
+    .trim()
+    .split("\n")
+    .filter((f) => f.length > 0);
+
+  core.info(`Found ${allPaths.length} file(s) in repository`);
+
+  const filteredPaths = filterPaths(allPaths, include, exclude);
+  if (filteredPaths.length !== allPaths.length) {
     core.info(`After filtering: ${filteredPaths.length} file(s)`);
   }
 
